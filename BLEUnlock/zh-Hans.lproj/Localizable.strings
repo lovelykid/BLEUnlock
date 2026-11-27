@@ -36,3 +36,7 @@
 "use_screensaver_to_lock" = "用屏保来锁定它";
 "wake_on_proximity" = "靠近唤醒";
 "wake_without_unlocking" = "唤醒时不需解锁";
+
+"search_devices" = "搜索名称、MAC 地址或 UUID";
+"refresh_devices" = "刷新";
+"choose_device" = "选择";
