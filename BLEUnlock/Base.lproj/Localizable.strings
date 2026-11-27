@@ -36,3 +36,8 @@
 "use_screensaver_to_lock" = "Use Screensaver to Lock";
 "wake_on_proximity" = "Wake on Proximity";
 "wake_without_unlocking" = "Wake without Unlocking";
+
+"search_devices" = "Search name, MAC address or UUID";
+"refresh_devices" = "Refresh";
+"choose_device" = "Select";
+"find_bluetooth_devices" = "Find Bluetooth Devices…";

@@ -36,28 +36,27 @@ class Device: NSObject {
     var scanTimer: Timer?
     var macAddr: String?
     var blName: String?
+    var advertisedName: String?
     
     override var description: String {
         get {
             if macAddr == nil || blName == nil {
                 if let info = getLEDeviceInfoFromUUID(uuid.description) {
-                    blName = info.name
-                    macAddr = info.macAddr
+                    blName = info.name ?? blName
+                    macAddr = info.macAddr ?? macAddr
                 }
             }
             if macAddr == nil {
                 macAddr = getMACFromUUID(uuid.description)
             }
-            if let mac = macAddr {
-                if blName == nil {
-                    blName = getNameFromMAC(mac)
-                }
-                if let name = blName {
-                    // If it's just "iPhone" or "iPad", there's a chance we can get the model name in the following code
-                    if name != "iPhone" && name != "iPad" {
-                        return name
-                    }
-                }
+            if blName == nil, let mac = macAddr {
+                blName = getNameFromMAC(mac)
+            }
+            let names = [advertisedName, blName, peripheral?.name].compactMap {
+                $0?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty }
+            if let name = names.first(where: { $0 != "iPhone" && $0 != "iPad" }) {
+                return name
             }
             if let manu = manufacture {
                 if let mod = model {
@@ -67,11 +66,6 @@ class Device: NSObject {
                     return String(format: "%@/%@", manu, mod)
                 } else {
                     return manu
-                }
-            }
-            if let name = peripheral?.name {
-                if name.trimmingCharacters(in: .whitespaces).count != 0 {
-                    return name
                 }
             }
             if let mod = model {
@@ -91,7 +85,7 @@ class Device: NSObject {
                     }
                 }
             }
-            if let name = blName {
+            if let name = names.first {
                 return name
             }
             if let mac = macAddr {
@@ -141,13 +135,19 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var connectionTimer : Timer? = nil
 
     func scanForPeripherals() {
-        guard !centralMgr.isScanning else { return }
+        guard centralMgr.state == .poweredOn, !centralMgr.isScanning else { return }
         centralMgr.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         //print("Start scanning")
     }
 
     func startScanning() {
         scanMode = true
+        scanForPeripherals()
+    }
+
+    func refreshScan() {
+        guard scanMode, centralMgr.state == .poweredOn else { return }
+        centralMgr.stopScan()
         scanForPeripherals()
     }
 
@@ -266,11 +266,11 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func resetScanTimer(device: Device) {
         device.scanTimer?.invalidate()
         device.scanTimer = Timer.scheduledTimer(withTimeInterval: signalTimeout, repeats: false, block: { _ in
+            self.devices.removeValue(forKey: device.uuid)
             self.delegate?.removeDevice(device: device)
-            if let p = device.peripheral {
+            if let p = device.peripheral, p != self.monitoredPeripheral {
                 self.centralMgr.cancelPeripheralConnection(p)
             }
-            self.devices.removeValue(forKey: device.uuid)
         })
         if let timer = device.scanTimer {
             RunLoop.main.add(timer, forMode: .common)
@@ -329,21 +329,23 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                     }
                 }
             }
-            let dev = devices[peripheral.identifier]
-            var device: Device
-            if (dev == nil) {
-                device = Device(uuid: peripheral.identifier)
-                if (rssi >= thresholdRSSI) {
-                    device.peripheral = peripheral
-                    device.rssi = rssi
-                    device.advData = advertisementData["kCBAdvDataManufacturerData"] as? Data
-                    devices[peripheral.identifier] = device
-                    central.connect(peripheral, options: nil)
-                    delegate?.newDevice(device: device)
-                }
+            let previous = devices[peripheral.identifier]
+            guard previous != nil || rssi >= thresholdRSSI else { return }
+            let device = previous ?? Device(uuid: peripheral.identifier)
+            device.peripheral = peripheral
+            device.rssi = rssi
+            if let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String,
+               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                device.advertisedName = name
+            }
+            if let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+                device.advData = data
+            }
+            if previous == nil {
+                devices[peripheral.identifier] = device
+                central.connect(peripheral, options: nil)
+                delegate?.newDevice(device: device)
             } else {
-                device = dev!
-                device.rssi = rssi
                 delegate?.updateDevice(device: device)
             }
             resetScanTimer(device: device)
@@ -446,6 +448,12 @@ class BLE: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
     
+    func peripheralDidUpdateName(_ peripheral: CBPeripheral) {
+        if let device = devices[peripheral.identifier] {
+            delegate?.updateDevice(device: device)
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral,
                     didModifyServices invalidatedServices: [CBService])
     {
