@@ -40,3 +40,4 @@
 "search_devices" = "Search name, MAC address or UUID";
 "refresh_devices" = "Refresh";
 "choose_device" = "Select";
+"find_bluetooth_devices" = "Find Bluetooth Devices…";
