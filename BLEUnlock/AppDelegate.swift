@@ -7,16 +7,28 @@ func t(_ key: String) -> String {
 }
 
 @NSApplicationMain
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation, NSUserNotificationCenterDelegate, BLEDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation, NSUserNotificationCenterDelegate, BLEDelegate,
+                   NSWindowDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let ble = BLE()
     let mainMenu = NSMenu()
-    let deviceMenu = NSMenu()
     let lockRSSIMenu = NSMenu()
     let unlockRSSIMenu = NSMenu()
     let timeoutMenu = NSMenu()
     let lockDelayMenu = NSMenu()
-    var deviceDict: [UUID: NSMenuItem] = [:]
+    private struct DeviceRow: Equatable {
+        let uuid: UUID
+        let title: String
+        let searchText: [String]
+    }
+
+    private var devicePanel: NSPanel?
+    private let deviceSearch = NSSearchField()
+    private let deviceTable = NSTableView()
+    private var deviceRows: [DeviceRow] = []
+    private var deviceRowsUpdatePending = false
+    private lazy var chooseDeviceButton = NSButton(title: t("choose_device"),
+                                                    target: self, action: #selector(selectDevice))
     var monitorMenuItem : NSMenuItem?
     let prefs = UserDefaults.standard
     var displaySleep = false
@@ -32,9 +44,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     var lastRSSI: Int? = nil
 
     func menuWillOpen(_ menu: NSMenu) {
-        if menu == deviceMenu {
-            ble.startScanning()
-        } else if menu == lockRSSIMenu {
+        if menu == lockRSSIMenu {
             for item in menu.items {
                 if item.tag == ble.lockRSSI {
                     item.state = .on
@@ -78,42 +88,158 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         return true
     }
     
-    func menuDidClose(_ menu: NSMenu) {
-        if menu == deviceMenu {
+    @objc private func showDevices() {
+        if devicePanel == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 540, height: 340),
+                                styleMask: [.titled, .closable, .resizable],
+                                backing: .buffered, defer: false)
+            panel.title = t("device")
+            panel.delegate = self
+            panel.isReleasedWhenClosed = false
+            panel.hidesOnDeactivate = false
+            panel.contentMinSize = NSSize(width: 380, height: 220)
+            panel.center()
+
+            deviceSearch.placeholderString = t("search_devices")
+            deviceSearch.delegate = self
+
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("device"))
+            column.resizingMask = .autoresizingMask
+            deviceTable.addTableColumn(column)
+            deviceTable.headerView = nil
+            deviceTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+            deviceTable.dataSource = self
+            deviceTable.delegate = self
+            deviceTable.target = self
+            deviceTable.doubleAction = #selector(doubleClickDevice)
+            deviceTable.rowHeight = 24
+
+            let scroll = NSScrollView()
+            scroll.documentView = deviceTable
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+
+            let refresh = NSButton(title: t("refresh_devices"), target: self,
+                                   action: #selector(refreshDevices))
+            let controls = NSStackView(views: [deviceSearch, refresh, chooseDeviceButton])
+            deviceSearch.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            chooseDeviceButton.isEnabled = false
+
+            let content = panel.contentView!
+            controls.translatesAutoresizingMaskIntoConstraints = false
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(controls)
+            content.addSubview(scroll)
+            NSLayoutConstraint.activate([
+                controls.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+                controls.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+                controls.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+                scroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 10),
+                scroll.leadingAnchor.constraint(equalTo: controls.leadingAnchor),
+                scroll.trailingAnchor.constraint(equalTo: controls.trailingAnchor),
+                scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)
+            ])
+            devicePanel = panel
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        devicePanel?.makeKeyAndOrderFront(nil)
+        devicePanel?.makeFirstResponder(deviceSearch)
+        ble.startScanning()
+        updateDeviceRows()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window === devicePanel {
             ble.stopScanning()
         }
     }
-    
-    func menuItemTitle(device: Device) -> String {
-        var desc : String!
-        if let mac = device.macAddr {
-            let prettifiedMac = mac.replacingOccurrences(of: "-", with: ":").uppercased()
-            desc = String(format: "%@ (%@)", device.description, prettifiedMac)
+
+    @objc private func refreshDevices() {
+        for device in ble.devices.values {
+            device.blName = nil
+            device.macAddr = nil
+        }
+        ble.refreshScan()
+        updateDeviceRows()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        updateDeviceRows()
+    }
+
+    private var selectedDeviceID: UUID? {
+        let row = deviceTable.selectedRow
+        return deviceRows.indices.contains(row) ? deviceRows[row].uuid : nil
+    }
+
+    private func updateDeviceRows() {
+        guard devicePanel?.isVisible == true else { return }
+
+        let query = deviceSearch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rows = ble.devices.values.map { device -> DeviceRow in
+            let name = device.description
+            let uuid = device.uuid.uuidString
+            let mac = device.macAddr?.replacingOccurrences(of: "-", with: ":").uppercased()
+            let identifier = mac ?? uuid
+            let label = name.caseInsensitiveCompare(device.macAddr ?? uuid) == .orderedSame
+                ? identifier : "\(name) (\(identifier))"
+            let title = "\(device.uuid == ble.monitoredUUID ? "✓ " : "")\(label) (\(device.rssi) dBm)"
+            let searchText = [name, uuid, mac, device.macAddr, device.advertisedName,
+                              device.blName, device.peripheral?.name, device.manufacture, device.model]
+            return DeviceRow(uuid: device.uuid, title: title, searchText: searchText.compactMap { $0 })
+        }.filter { row in
+            query.isEmpty || row.searchText.contains { $0.localizedCaseInsensitiveContains(query) }
+        }.sorted { $0.uuid.uuidString < $1.uuid.uuidString }
+
+        guard rows != deviceRows else { return }
+        let selection = selectedDeviceID
+        deviceRows = rows
+        deviceTable.reloadData()
+        if let row = rows.firstIndex(where: { $0.uuid == selection }) {
+            deviceTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         } else {
-            desc = device.description
+            deviceTable.deselectAll(nil)
         }
-        return String(format: "%@ (%ddBm)", desc, device.rssi)
+        chooseDeviceButton.isEnabled = selectedDeviceID != nil
     }
-    
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return deviceRows.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let device = deviceRows[row]
+        let label = NSTextField(labelWithString: device.title)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.toolTip = device.title
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        chooseDeviceButton.isEnabled = selectedDeviceID != nil
+    }
+
+    private func scheduleDeviceRowsUpdate() {
+        guard devicePanel?.isVisible == true, !deviceRowsUpdatePending else { return }
+        deviceRowsUpdatePending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { [weak self] in
+            guard let self = self else { return }
+            self.deviceRowsUpdatePending = false
+            self.updateDeviceRows()
+        }
+    }
+
     func newDevice(device: Device) {
-        let menuItem = deviceMenu.addItem(withTitle: menuItemTitle(device: device), action:#selector(selectDevice), keyEquivalent: "")
-        deviceDict[device.uuid] = menuItem
-        if (device.uuid == ble.monitoredUUID) {
-            menuItem.state = .on
-        }
+        scheduleDeviceRowsUpdate()
     }
-    
+
     func updateDevice(device: Device) {
-        if let menu = deviceDict[device.uuid] {
-            menu.title = menuItemTitle(device: device)
-        }
+        scheduleDeviceRowsUpdate()
     }
-    
+
     func removeDevice(device: Device) {
-        if let menuItem = deviceDict[device.uuid] {
-            menuItem.menu?.removeItem(menuItem)
-        }
-        deviceDict.removeValue(forKey: device.uuid)
+        scheduleDeviceRowsUpdate()
     }
 
     func updateRSSI(rssi: Int?, active: Bool) {
@@ -365,16 +491,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         inScreensaver = false
     }
 
-    @objc func selectDevice(item: NSMenuItem) {
-        for (uuid, menuItem) in deviceDict {
-            if menuItem == item {
-                monitorDevice(uuid: uuid)
-                prefs.set(uuid.uuidString, forKey: "device")
-                menuItem.state = .on
-            } else {
-                menuItem.state = .off
-            }
-        }
+    @objc private func doubleClickDevice() {
+        guard deviceTable.clickedRow >= 0 else { return }
+        selectDevice()
+    }
+
+    @objc private func selectDevice() {
+        guard let uuid = selectedDeviceID, ble.devices[uuid] != nil else { return }
+        devicePanel?.close()
+        monitorDevice(uuid: uuid)
+        prefs.set(uuid.uuidString, forKey: "device")
     }
 
     func monitorDevice(uuid: UUID) {
@@ -581,10 +707,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         item = mainMenu.addItem(withTitle: t("lock_now"), action: #selector(lockNow), keyEquivalent: "")
         mainMenu.addItem(NSMenuItem.separator())
 
-        item = mainMenu.addItem(withTitle: t("device"), action: nil, keyEquivalent: "")
-        item.submenu = deviceMenu
-        deviceMenu.delegate = self
-        deviceMenu.addItem(withTitle: t("scanning"), action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: t("device"), action: #selector(showDevices), keyEquivalent: "")
 
         let unlockRSSIItem = mainMenu.addItem(withTitle: t("unlock_rssi"), action: nil, keyEquivalent: "")
         unlockRSSIItem.submenu = unlockRSSIMenu
