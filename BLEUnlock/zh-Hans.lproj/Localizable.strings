@@ -40,3 +40,4 @@
 "search_devices" = "搜索名称、MAC 地址或 UUID";
 "refresh_devices" = "刷新";
 "choose_device" = "选择";
+"find_bluetooth_devices" = "查找蓝牙设备…";
