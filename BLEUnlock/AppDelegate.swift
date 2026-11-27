@@ -2,8 +2,8 @@ import Cocoa
 import Quartz
 import ServiceManagement
 
-func t(_ key: String) -> String {
-    return NSLocalizedString(key, comment: "")
+func t(_ key: String, fallback: String = "") -> String {
+    return NSLocalizedString(key, value: fallback, comment: "")
 }
 
 @NSApplicationMain
@@ -27,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
     private let deviceTable = NSTableView()
     private var deviceRows: [DeviceRow] = []
     private var deviceRowsUpdatePending = false
-    private lazy var chooseDeviceButton = NSButton(title: t("choose_device"),
+    private lazy var chooseDeviceButton = NSButton(title: t("choose_device", fallback: "Select"),
                                                     target: self, action: #selector(selectDevice))
     var monitorMenuItem : NSMenuItem?
     let prefs = UserDefaults.standard
@@ -100,8 +100,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             panel.contentMinSize = NSSize(width: 380, height: 220)
             panel.center()
 
-            deviceSearch.placeholderString = t("search_devices")
+            deviceSearch.placeholderString = t("search_devices", fallback: "Search name, MAC address or UUID")
+            deviceSearch.setAccessibilityLabel(deviceSearch.placeholderString)
             deviceSearch.delegate = self
+            deviceSearch.target = self
+            deviceSearch.action = #selector(searchDevices)
 
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("device"))
             column.resizingMask = .autoresizingMask
@@ -119,9 +122,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             scroll.hasVerticalScroller = true
             scroll.borderType = .bezelBorder
 
-            let refresh = NSButton(title: t("refresh_devices"), target: self,
+            let refresh = NSButton(title: t("refresh_devices", fallback: "Refresh"), target: self,
                                    action: #selector(refreshDevices))
             let controls = NSStackView(views: [deviceSearch, refresh, chooseDeviceButton])
+            controls.orientation = .horizontal
+            controls.alignment = .centerY
+            controls.detachesHiddenViews = false
             deviceSearch.setContentHuggingPriority(.defaultLow, for: .horizontal)
             chooseDeviceButton.isEnabled = false
 
@@ -131,6 +137,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
             content.addSubview(controls)
             content.addSubview(scroll)
             NSLayoutConstraint.activate([
+                deviceSearch.widthAnchor.constraint(greaterThanOrEqualToConstant: 210),
                 controls.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
                 controls.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
                 controls.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
@@ -164,8 +171,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         updateDeviceRows()
     }
 
-    func controlTextDidChange(_ notification: Notification) {
+    @objc private func searchDevices() {
         updateDeviceRows()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        searchDevices()
     }
 
     private var selectedDeviceID: UUID? {
@@ -707,7 +718,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVa
         item = mainMenu.addItem(withTitle: t("lock_now"), action: #selector(lockNow), keyEquivalent: "")
         mainMenu.addItem(NSMenuItem.separator())
 
-        mainMenu.addItem(withTitle: t("device"), action: #selector(showDevices), keyEquivalent: "")
+        let findDevicesTitle = t("find_bluetooth_devices", fallback: "Find Bluetooth Devices…")
+        item = mainMenu.addItem(withTitle: findDevicesTitle, action: #selector(showDevices), keyEquivalent: "")
+        item.target = self
 
         let unlockRSSIItem = mainMenu.addItem(withTitle: t("unlock_rssi"), action: nil, keyEquivalent: "")
         unlockRSSIItem.submenu = unlockRSSIMenu
